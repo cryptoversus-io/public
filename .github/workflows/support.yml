@@ -76,12 +76,12 @@ jobs:
                 
                 const labelNames = discussion.labels.nodes.map(label => label.name);
                 
-                labelNames.push('client-support');
+                labelNames.push('discussions-marketing');
                 
-                labelNames.push(`category:${category}`);
+                labelNames.push(`support:${category}`);
                 
                 try {
-                  // Check if issue exists in the target repo
+                  // Search in the private repository instead
                   const searchResult = await github.rest.search.issuesAndPullRequests({
                     q: `repo:${context.repo.owner}/discussion_board ${discussion.url} in:body`,
                   });
@@ -91,10 +91,10 @@ jobs:
                     continue;
                   }
                   
-                  // Create issue in the discussion_board repo
+                  // Create issue in the private repository
                   const issue = await github.rest.issues.create({
                     owner: context.repo.owner,
-                    repo: "discussion_board", // Target repo
+                    repo: "discussion_board",
                     title: discussion.title,
                     body: `${discussion.body}\n\n**[Original Discussion](${discussion.url})**`,
                     labels: labelNames
@@ -126,17 +126,17 @@ jobs:
             // Get labels from discussion
             const labelNames = discussion.labels.map(label => label.name);
             
-            // Add the standard client-support label
-            labelNames.push('client-support');
+            // Add the standard discussions-marketing label
+            labelNames.push('discussions-marketing');
             
-            // Add category-specific label
+            // Add support-specific label
             const category = process.env.SINGLE_CATEGORY;
-            labelNames.push(`category:${category}`);
+            labelNames.push(`support:${category}`);
             
-            // Create issue in the discussion_board repo
+            // Create issue in the private repository
             const issue = await github.rest.issues.create({
               owner: context.repo.owner,
-              repo: "discussion_board", // Target repo
+              repo: "discussion_board",
               title: discussion.title,
               body: `${discussion.body}\n\n**[Original Discussion](${discussion.html_url})**`,
               labels: labelNames
@@ -199,7 +199,7 @@ jobs:
               try {
                 await github.rest.issues.addAssignees({
                   owner: context.repo.owner,
-                  repo: "discussion_board", // Target repo
+                  repo: "discussion_board",
                   issue_number: parseInt(issueNumber),
                   assignees: [`@CryptoVersus/${team}`]
                 });
@@ -259,18 +259,18 @@ jobs:
                 
                 let team = "";
                 switch(issue.category) {
-                  case "Bug Reports & Issues": team = "Support & Documentation"; break;
-                  case "FAQ": team = "Support & Documentation"; break;
-                  case "Announcements": team = "Media & Outreach"; break;
-                  case "Q&A": team = "Support & Documentation"; break;
-                  case "Members": team = "Marketing & Growth"; break;
+                case "Bug Reports & Issues": team = "Support & Documentation"; break;
+                case "FAQ": team = "Support & Documentation"; break;
+                case "Announcements": team = "Media & Outreach"; break;
+                case "Q&A": team = "Support & Documentation"; break;
+                case "Members": team = "Marketing & Growth"; break;
                 }
                 
                 if (team) {
                   console.log(`Assigning issue #${issue.number} to team: ${team}`);
                   await github.rest.issues.addAssignees({
                     owner: context.repo.owner,
-                    repo: "discussion_board", // Target repo
+                    repo: "discussion_board",
                     issue_number: issue.number,
                     assignees: [`@CryptoVersus/${team}`]
                   });
@@ -290,20 +290,18 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const discussion = context.payload.discussion;
-            
-            // Search for issues in discussion_board repo with the client-support label
+            // Search for issues in the private repository
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
-              repo: "discussion_board", // Target repo
-              labels: ["client-support"],
-              state: "open"
+              repo: "discussion_board",
+              labels: ["discussions-marketing"],
             });
             
             for (const issue of issues.data) {
               if (issue.body.includes(discussion.html_url)) {
                 await github.rest.issues.update({
                   owner: context.repo.owner,
-                  repo: "discussion_board", // Target repo
+                  repo: "discussion_board",
                   issue_number: issue.number,
                   state: "closed"
                 });
