@@ -83,7 +83,7 @@ jobs:
                 try {
                   // Search in the private repository instead
                   const searchResult = await github.rest.search.issuesAndPullRequests({
-                    q: `repo:${context.repo.owner}/discussion_board ${discussion.url} in:body`,
+                    q: `repo:CryptoVersus/discussion_board ${discussion.url} in:body`,
                   });
                   
                   if (searchResult.data.total_count > 0) {
@@ -93,7 +93,7 @@ jobs:
                   
                   // Create issue in the private repository
                   const issue = await github.rest.issues.create({
-                    owner: context.repo.owner,
+                    owner: "CryptoVersus",
                     repo: "discussion_board",
                     title: discussion.title,
                     body: `${discussion.body}\n\n**[Original Discussion](${discussion.url})**`,
@@ -133,21 +133,28 @@ jobs:
             const category = process.env.SINGLE_CATEGORY;
             labelNames.push(`support:${category}`);
             
-            // Create issue in the private repository
-            const issue = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: "discussion_board",
-              title: discussion.title,
-              body: `${discussion.body}\n\n**[Original Discussion](${discussion.html_url})**`,
-              labels: labelNames
-            });
+            console.log("Creating issue in CryptoVersus/discussion_board");
             
-            console.log(`Created Issue: ${issue.data.html_url}`);
-            
-            // Store Issue Node ID for next step
-            core.setOutput('issue_id', issue.data.node_id);
-            core.setOutput('issue_number', issue.data.number);
-            core.setOutput('category', process.env.SINGLE_CATEGORY);
+            // Create issue in the private repository with explicit organization name
+            try {
+              const issue = await github.rest.issues.create({
+                owner: "CryptoVersus",
+                repo: "discussion_board",
+                title: discussion.title,
+                body: `${discussion.body}\n\n**[Original Discussion](${discussion.html_url})**`,
+                labels: labelNames
+              });
+              
+              console.log(`Created Issue: ${issue.data.html_url}`);
+              
+              // Store Issue Node ID for next step
+              core.setOutput('issue_id', issue.data.node_id);
+              core.setOutput('issue_number', issue.data.number);
+              core.setOutput('category', process.env.SINGLE_CATEGORY);
+            } catch (error) {
+              console.error(`Error creating issue: ${error.message}`);
+              core.setFailed(`Failed to create issue: ${error.message}`);
+            }
             
   add_to_project:
     needs: create_issue
@@ -198,7 +205,7 @@ jobs:
               console.log(`Assigning to team: ${team}`);
               try {
                 await github.rest.issues.addAssignees({
-                  owner: context.repo.owner,
+                  owner: "CryptoVersus",
                   repo: "discussion_board",
                   issue_number: parseInt(issueNumber),
                   assignees: [`@CryptoVersus/${team}`]
@@ -269,7 +276,7 @@ jobs:
                 if (team) {
                   console.log(`Assigning issue #${issue.number} to team: ${team}`);
                   await github.rest.issues.addAssignees({
-                    owner: context.repo.owner,
+                    owner: "CryptoVersus",
                     repo: "discussion_board",
                     issue_number: issue.number,
                     assignees: [`@CryptoVersus/${team}`]
@@ -292,7 +299,7 @@ jobs:
             const discussion = context.payload.discussion;
             // Search for issues in the private repository
             const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
+              owner: "CryptoVersus",
               repo: "discussion_board",
               labels: ["discussions-marketing"],
             });
@@ -300,7 +307,7 @@ jobs:
             for (const issue of issues.data) {
               if (issue.body.includes(discussion.html_url)) {
                 await github.rest.issues.update({
-                  owner: context.repo.owner,
+                  owner: "CryptoVersus",
                   repo: "discussion_board",
                   issue_number: issue.number,
                   state: "closed"
