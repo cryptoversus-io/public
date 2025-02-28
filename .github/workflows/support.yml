@@ -1,0 +1,306 @@
+name: Client Support
+on:
+  discussion:
+    types: [created, edited, answered]
+  workflow_dispatch:
+
+jobs:
+  create_issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Discussion Category from Event
+        id: category-event
+        if: github.event_name == 'discussion'
+        run: |
+          CATEGORY="${{ github.event.discussion.category.name }}"
+          if [[ "$CATEGORY" =~ ^(Members|FAQ|Q&A|Announcements|Bug Reports & Issues)$ ]]; then
+            echo "MATCH=true" >> $GITHUB_ENV
+            echo "SINGLE_CATEGORY=$CATEGORY" >> $GITHUB_ENV
+          else
+            echo "MATCH=false" >> $GITHUB_ENV
+          fi
+      
+      - name: Checkout repository for manual runs
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v3
+          
+      - name: Fetch All Discussions for Manual Runs
+        if: github.event_name == 'workflow_dispatch'
+        id: fetch-discussions
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_TOKEN }}
+        run: |
+          echo "Fetching discussions..."
+          gh api graphql -f query='
+          {
+            organization(login: "CryptoVersus") {
+              repository(name: "cryptoversus-io") {
+                discussions(first: 50) {
+                  nodes {
+                    id
+                    title
+                    url
+                    body
+                    category { name }
+                    labels(first: 10) { nodes { name } }
+                  }
+                }
+              }
+            }
+          }' > discussions.json
+          
+          echo "Discussions fetched. Processing..."
+          echo "BATCH_PROCESS=true" >> $GITHUB_ENV
+
+      - name: Process Batch Discussions
+        if: env.BATCH_PROCESS == 'true'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.ACTIONS_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const discussionsData = JSON.parse(fs.readFileSync('discussions.json', 'utf8'));
+            const discussions = discussionsData.data.organization.repository.discussions.nodes;
+            
+            const relevantCategories = [
+              'Announcements', 'Bug Reports & Issues', 'Members', 'FAQ', 'Q&A'
+            ];
+            
+            const createdIssueIds = [];
+            
+            for (const discussion of discussions) {
+              const category = discussion.category.name;
+              
+              if (relevantCategories.includes(category)) {
+                console.log(`Processing discussion: ${discussion.title}`);
+                
+                const labelNames = discussion.labels.nodes.map(label => label.name);
+                
+                labelNames.push('client-support');
+                
+                labelNames.push(`category:${category}`);
+                
+                try {
+                  const searchResult = await github.rest.search.issuesAndPullRequests({
+                    q: `repo:${context.repo.owner}/${context.repo.repo} ${discussion.url} in:body`,
+                  });
+                  
+                  if (searchResult.data.total_count > 0) {
+                    console.log(`Issue already exists for: ${discussion.title}`);
+                    continue;
+                  }
+                  
+                  const issue = await github.rest.issues.create({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    title: discussion.title,
+                    body: `${discussion.body}\n\n**[Original Discussion](${discussion.url})**`,
+                    labels: labelNames
+                  });
+                  
+                  console.log(`Created Issue: ${issue.data.html_url}`);
+                  
+                  createdIssueIds.push({
+                    id: issue.data.node_id,
+                    number: issue.data.number,
+                    category: category
+                  });
+                } catch (error) {
+                  console.error(`Error creating issue for ${discussion.title}: ${error.message}`);
+                }
+              }
+            }
+            
+            fs.writeFileSync('created-issues.json', JSON.stringify(createdIssueIds));
+      
+      - name: Create Issue for Single Discussion Event
+        if: github.event_name == 'discussion' && env.MATCH == 'true'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const discussion = context.payload.discussion;
+            
+            // Get labels from discussion
+            const labelNames = discussion.labels.map(label => label.name);
+            
+            // Add the standard client-support label
+            labelNames.push('client-support');
+            
+            // Add category-specific label
+            const category = process.env.SINGLE_CATEGORY;
+            labelNames.push(`category:${category}`);
+            
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: discussion.title,
+              body: `${discussion.body}\n\n**[Original Discussion](${discussion.html_url})**`,
+              labels: labelNames
+            });
+            
+            console.log(`Created Issue: ${issue.data.html_url}`);
+            
+            // Store Issue Node ID for next step
+            core.setOutput('issue_id', issue.data.node_id);
+            core.setOutput('issue_number', issue.data.number);
+            core.setOutput('category', process.env.SINGLE_CATEGORY);
+            
+  add_to_project:
+    needs: create_issue
+    runs-on: ubuntu-latest
+    if: github.event_name == 'discussion' && needs.create_issue.outputs.issue_id != ''
+    steps:
+      - name: Add Issue to Project Board
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const query = `
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+                item {
+                  id
+                }
+              }
+            }`;
+            
+            const variables = {
+              projectId: "PVT_kwDOCLSZrs4AsSM-",
+              contentId: "${{ needs.create_issue.outputs.issue_id }}"
+            };
+            
+            await github.graphql(query, variables);
+            console.log("Added Issue to Project Board");
+      
+      - name: Assign Issue to Team Based on Category
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const category = "${{ needs.create_issue.outputs.category }}";
+            const issueNumber = "${{ needs.create_issue.outputs.issue_number }}";
+            
+            let team = "";
+            
+            switch(category) {
+              case "Bug Reports & Issues": team = "Support & Documentation"; break;
+              case "FAQ": team = "Support & Documentation"; break;
+              case "Announcements": team = "Media & Outreach"; break;
+              case "Q&A": team = "Support & Documentation"; break;
+              case "Members": team = "Marketing & Growth"; break;
+            }
+            
+            if (team) {
+              console.log(`Assigning to team: ${team}`);
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: parseInt(issueNumber),
+                  assignees: [`@CryptoVersus/${team}`]
+                });
+                console.log("Team assigned successfully");
+              } catch (error) {
+                console.error(`Error assigning team: ${error.message}`);
+              }
+            }
+  
+  process_batch_issues:
+    needs: create_issue
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Add Batch Issues to Project and Assign Teams
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.ACTIONS_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            if (!fs.existsSync('created-issues.json')) {
+              console.log('No issues created in this run');
+              return;
+            }
+            
+            const createdIssues = JSON.parse(fs.readFileSync('created-issues.json', 'utf8'));
+            
+            if (createdIssues.length === 0) {
+              console.log('No issues to process');
+              return;
+            }
+            
+            console.log(`Processing ${createdIssues.length} created issues`);
+            
+            const addToProjectQuery = `
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+                item {
+                  id
+                }
+              }
+            }`;
+            
+            for (const issue of createdIssues) {
+              try {
+                console.log(`Adding issue #${issue.number} to project`);
+                const variables = {
+                  projectId: "PVT_kwDOCLSZrs4AsSM-",
+                  contentId: issue.id
+                };
+                
+                await github.graphql(addToProjectQuery, variables);
+                
+                let team = "";
+                switch(issue.category) {
+                case "Bug Reports & Issues": team = "Support & Documentation"; break;
+                case "FAQ": team = "Support & Documentation"; break;
+                case "Announcements": team = "Media & Outreach"; break;
+                case "Q&A": team = "Support & Documentation"; break;
+                case "Members": team = "Marketing & Growth"; break;
+            }
+                
+                if (team) {
+                  console.log(`Assigning issue #${issue.number} to team: ${team}`);
+                  await github.rest.issues.addAssignees({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    assignees: [`@CryptoVersus/${team}`]
+                  });
+                }
+              } catch (error) {
+                console.error(`Error processing issue #${issue.number}: ${error.message}`);
+              }
+            }
+            
+  auto_close:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'discussion' && github.event.action == 'answered'
+    steps:
+      - name: Close Issue When Discussion is Answered
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const discussion = context.payload.discussion;
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ["client-support"],
+            });
+            
+            for (const issue of issues.data) {
+              if (issue.body.includes(discussion.html_url)) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: "closed"
+                });
+                console.log(`Closed Issue: ${issue.html_url}`);
+              }
+            }
