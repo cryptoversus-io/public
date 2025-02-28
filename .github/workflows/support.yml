@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  add_to_project:
+  create_issue:
     runs-on: ubuntu-latest
     steps:
       - name: Check Discussion Category from Event
@@ -66,7 +66,7 @@ jobs:
               'Announcements', 'Bug Reports & Issues', 'Members', 'FAQ', 'Q&A'
             ];
             
-            const projectId = "PVT_kwDOCLSZrs4AsSM-";
+            const createdIssueIds = [];
             
             for (const discussion of discussions) {
               const category = discussion.category.name;
@@ -74,450 +74,239 @@ jobs:
               if (relevantCategories.includes(category)) {
                 console.log(`Processing discussion: ${discussion.title}`);
                 
-                // Check if discussion is already in project
-                const checkQuery = `
-                query($projectId: ID!, $query: String!) {
-                  project: node(id: $projectId) {
-                    ... on ProjectV2 {
-                      items(first: 5, query: $query) {
-                        nodes {
-                          id
-                          content {
-                            ... on Discussion {
-                              url
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }`;
+                const labelNames = discussion.labels.nodes.map(label => label.name);
                 
-                const checkVariables = {
-                  projectId: projectId,
-                  query: discussion.title
-                };
+                labelNames.push('client-support');
+                
+                labelNames.push(`category:${category}`);
                 
                 try {
-                  const checkResult = await github.graphql(checkQuery, checkVariables);
-                  const items = checkResult.project.items.nodes;
+                  // Check if issue exists in the target repo
+                  const searchResult = await github.rest.search.issuesAndPullRequests({
+                    q: `repo:${context.repo.owner}/discussion_board ${discussion.url} in:body`,
+                  });
                   
-                  const existingItem = items.find(item => 
-                    item.content && 
-                    item.content.url === discussion.url
-                  );
-                  
-                  if (existingItem) {
-                    console.log(`Discussion already in project: ${discussion.title}`);
+                  if (searchResult.data.total_count > 0) {
+                    console.log(`Issue already exists for: ${discussion.title}`);
                     continue;
                   }
                   
-                  // Add discussion to project
-                  const addQuery = `
-                  mutation($projectId: ID!, $contentId: ID!) {
-                    addProjectV2ItemById(input: {
-                      projectId: $projectId,
-                      contentId: $contentId
-                    }) {
-                      item {
-                        id
-                      }
-                    }
-                  }`;
+                  // Create issue in the discussion_board repo
+                  const issue = await github.rest.issues.create({
+                    owner: context.repo.owner,
+                    repo: "discussion_board", // Target repo
+                    title: discussion.title,
+                    body: `${discussion.body}\n\n**[Original Discussion](${discussion.url})**`,
+                    labels: labelNames
+                  });
                   
-                  const addVariables = {
-                    projectId: projectId,
-                    contentId: discussion.id
-                  };
+                  console.log(`Created Issue: ${issue.data.html_url}`);
                   
-                  const result = await github.graphql(addQuery, addVariables);
-                  console.log(`Added discussion to project: ${discussion.title}`);
-                  
-                  // Update status field based on category
-                  const itemId = result.addProjectV2ItemById.item.id;
-                  const team = getCategoryTeam(category);
-                  
-                  // Set team field and status field
-                  await updateProjectFields(github, projectId, itemId, category, team);
-                  
+                  createdIssueIds.push({
+                    id: issue.data.node_id,
+                    number: issue.data.number,
+                    category: category
+                  });
                 } catch (error) {
-                  console.error(`Error processing discussion ${discussion.title}: ${error.message}`);
+                  console.error(`Error creating issue for ${discussion.title}: ${error.message}`);
                 }
               }
             }
             
-            // Helper function to get team based on category
-            function getCategoryTeam(category) {
-              switch(category) {
-                case "Bug Reports & Issues": return "Support & Documentation";
-                case "FAQ": return "Support & Documentation";
-                case "Announcements": return "Media & Outreach"; 
-                case "Q&A": return "Support & Documentation";
-                case "Members": return "Marketing & Growth";
-                default: return "";
-              }
-            }
-            
-            // Helper function to update project fields
-            async function updateProjectFields(github, projectId, itemId, category, team) {
-              // First, get field IDs from the project
-              const fieldsQuery = `
-              query($projectId: ID!) {
-                node(id: $projectId) {
-                  ... on ProjectV2 {
-                    fields(first: 20) {
-                      nodes {
-                        ... on ProjectV2Field {
-                          id
-                          name
-                        }
-                        ... on ProjectV2SingleSelectField {
-                          id
-                          name
-                          options {
-                            id
-                            name
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }`;
-              
-              const fieldsVariables = {
-                projectId: projectId
-              };
-              
-              const fieldsResult = await github.graphql(fieldsQuery, fieldsVariables);
-              const fields = fieldsResult.node.fields.nodes;
-              
-              // Find Status field and Team field
-              const statusField = fields.find(field => field.name === "Status" && field.options);
-              const teamField = fields.find(field => field.name === "Team" && field.options);
-              
-              if (statusField) {
-                // Determine status based on category
-                let statusName = "New"; // Default
-                if (category === "Bug Reports & Issues") statusName = "Investigating";
-                
-                const statusOption = statusField.options.find(option => option.name === statusName);
-                
-                if (statusOption) {
-                  const updateStatusQuery = `
-                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $projectId,
-                      itemId: $itemId,
-                      fieldId: $fieldId,
-                      value: { 
-                        singleSelectOptionId: $optionId
-                      }
-                    }) {
-                      projectV2Item {
-                        id
-                      }
-                    }
-                  }`;
-                  
-                  const updateStatusVariables = {
-                    projectId: projectId,
-                    itemId: itemId,
-                    fieldId: statusField.id,
-                    optionId: statusOption.id
-                  };
-                  
-                  await github.graphql(updateStatusQuery, updateStatusVariables);
-                  console.log(`Set status to "${statusName}"`);
-                }
-              }
-              
-              if (teamField && team) {
-                const teamOption = teamField.options.find(option => option.name === team);
-                
-                if (teamOption) {
-                  const updateTeamQuery = `
-                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $projectId,
-                      itemId: $itemId,
-                      fieldId: $fieldId,
-                      value: { 
-                        singleSelectOptionId: $optionId
-                      }
-                    }) {
-                      projectV2Item {
-                        id
-                      }
-                    }
-                  }`;
-                  
-                  const updateTeamVariables = {
-                    projectId: projectId,
-                    itemId: itemId,
-                    fieldId: teamField.id,
-                    optionId: teamOption.id
-                  };
-                  
-                  await github.graphql(updateTeamQuery, updateTeamVariables);
-                  console.log(`Assigned to team "${team}"`);
-                }
-              }
-            }
-
-      - name: Add Single Discussion to Project
+            fs.writeFileSync('created-issues.json', JSON.stringify(createdIssueIds));
+      
+      - name: Create Issue for Single Discussion Event
         if: github.event_name == 'discussion' && env.MATCH == 'true'
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const discussion = context.payload.discussion;
-            const category = process.env.SINGLE_CATEGORY;
-            const projectId = "PVT_kwDOCLSZrs4AsSM-";
             
-            // Add discussion to project
-            const addQuery = `
+            // Get labels from discussion
+            const labelNames = discussion.labels.map(label => label.name);
+            
+            // Add the standard client-support label
+            labelNames.push('client-support');
+            
+            // Add category-specific label
+            const category = process.env.SINGLE_CATEGORY;
+            labelNames.push(`category:${category}`);
+            
+            // Create issue in the discussion_board repo
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: "discussion_board", // Target repo
+              title: discussion.title,
+              body: `${discussion.body}\n\n**[Original Discussion](${discussion.html_url})**`,
+              labels: labelNames
+            });
+            
+            console.log(`Created Issue: ${issue.data.html_url}`);
+            
+            // Store Issue Node ID for next step
+            core.setOutput('issue_id', issue.data.node_id);
+            core.setOutput('issue_number', issue.data.number);
+            core.setOutput('category', process.env.SINGLE_CATEGORY);
+            
+  add_to_project:
+    needs: create_issue
+    runs-on: ubuntu-latest
+    if: github.event_name == 'discussion' && needs.create_issue.outputs.issue_id != ''
+    steps:
+      - name: Add Issue to Project Board
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const query = `
             mutation($projectId: ID!, $contentId: ID!) {
-              addProjectV2ItemById(input: {
-                projectId: $projectId,
-                contentId: $contentId
-              }) {
+              addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
                 item {
                   id
                 }
               }
             }`;
             
-            const addVariables = {
-              projectId: projectId,
-              contentId: discussion.node_id
+            const variables = {
+              projectId: "PVT_kwDOCLSZrs4AsSM-",
+              contentId: "${{ needs.create_issue.outputs.issue_id }}"
             };
             
-            try {
-              const result = await github.graphql(addQuery, addVariables);
-              console.log(`Added discussion to project: ${discussion.title}`);
-              
-              // Get team based on category
-              let team = "";
-              switch(category) {
-                case "Bug Reports & Issues": team = "Support & Documentation"; break;
-                case "FAQ": team = "Support & Documentation"; break;
-                case "Announcements": team = "Media & Outreach"; break;
-                case "Q&A": team = "Support & Documentation"; break;
-                case "Members": team = "Marketing & Growth"; break;
-              }
-              
-              // Item ID for field updates
-              const itemId = result.addProjectV2ItemById.item.id;
-              
-              // Get field IDs from the project
-              const fieldsQuery = `
-              query($projectId: ID!) {
-                node(id: $projectId) {
-                  ... on ProjectV2 {
-                    fields(first: 20) {
-                      nodes {
-                        ... on ProjectV2Field {
-                          id
-                          name
-                        }
-                        ... on ProjectV2SingleSelectField {
-                          id
-                          name
-                          options {
-                            id
-                            name
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }`;
-              
-              const fieldsVariables = {
-                projectId: projectId
-              };
-              
-              const fieldsResult = await github.graphql(fieldsQuery, fieldsVariables);
-              const fields = fieldsResult.node.fields.nodes;
-              
-              // Find Status field and Team field
-              const statusField = fields.find(field => field.name === "Status" && field.options);
-              const teamField = fields.find(field => field.name === "Team" && field.options);
-              
-              if (statusField) {
-                // Determine status based on category
-                let statusName = "New"; // Default
-                if (category === "Bug Reports & Issues") statusName = "Investigating";
-                
-                const statusOption = statusField.options.find(option => option.name === statusName);
-                
-                if (statusOption) {
-                  const updateStatusQuery = `
-                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $projectId,
-                      itemId: $itemId,
-                      fieldId: $fieldId,
-                      value: { 
-                        singleSelectOptionId: $optionId
-                      }
-                    }) {
-                      projectV2Item {
-                        id
-                      }
-                    }
-                  }`;
-                  
-                  const updateStatusVariables = {
-                    projectId: projectId,
-                    itemId: itemId,
-                    fieldId: statusField.id,
-                    optionId: statusOption.id
-                  };
-                  
-                  await github.graphql(updateStatusQuery, updateStatusVariables);
-                  console.log(`Set status to "${statusName}"`);
-                }
-              }
-              
-              if (teamField && team) {
-                const teamOption = teamField.options.find(option => option.name === team);
-                
-                if (teamOption) {
-                  const updateTeamQuery = `
-                  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                    updateProjectV2ItemFieldValue(input: {
-                      projectId: $projectId,
-                      itemId: $itemId,
-                      fieldId: $fieldId,
-                      value: { 
-                        singleSelectOptionId: $optionId
-                      }
-                    }) {
-                      projectV2Item {
-                        id
-                      }
-                    }
-                  }`;
-                  
-                  const updateTeamVariables = {
-                    projectId: projectId,
-                    itemId: itemId,
-                    fieldId: teamField.id,
-                    optionId: teamOption.id
-                  };
-                  
-                  await github.graphql(updateTeamQuery, updateTeamVariables);
-                  console.log(`Assigned to team "${team}"`);
-                }
-              }
-              
-            } catch (error) {
-              console.error(`Error processing discussion: ${error.message}`);
+            await github.graphql(query, variables);
+            console.log("Added Issue to Project Board");
+      
+      - name: Assign Issue to Team Based on Category
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const category = "${{ needs.create_issue.outputs.category }}";
+            const issueNumber = "${{ needs.create_issue.outputs.issue_number }}";
+            
+            let team = "";
+            
+            switch(category) {
+              case "Bug Reports & Issues": team = "Support & Documentation"; break;
+              case "FAQ": team = "Support & Documentation"; break;
+              case "Announcements": team = "Media & Outreach"; break;
+              case "Q&A": team = "Support & Documentation"; break;
+              case "Members": team = "Marketing & Growth"; break;
             }
             
-  update_project_item:
+            if (team) {
+              console.log(`Assigning to team: ${team}`);
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: "discussion_board", // Target repo
+                  issue_number: parseInt(issueNumber),
+                  assignees: [`@CryptoVersus/${team}`]
+                });
+                console.log("Team assigned successfully");
+              } catch (error) {
+                console.error(`Error assigning team: ${error.message}`);
+              }
+            }
+  
+  process_batch_issues:
+    needs: create_issue
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Add Batch Issues to Project and Assign Teams
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.ACTIONS_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            if (!fs.existsSync('created-issues.json')) {
+              console.log('No issues created in this run');
+              return;
+            }
+            
+            const createdIssues = JSON.parse(fs.readFileSync('created-issues.json', 'utf8'));
+            
+            if (createdIssues.length === 0) {
+              console.log('No issues to process');
+              return;
+            }
+            
+            console.log(`Processing ${createdIssues.length} created issues`);
+            
+            const addToProjectQuery = `
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+                item {
+                  id
+                }
+              }
+            }`;
+            
+            for (const issue of createdIssues) {
+              try {
+                console.log(`Adding issue #${issue.number} to project`);
+                const variables = {
+                  projectId: "PVT_kwDOCLSZrs4AsSM-",
+                  contentId: issue.id
+                };
+                
+                await github.graphql(addToProjectQuery, variables);
+                
+                let team = "";
+                switch(issue.category) {
+                  case "Bug Reports & Issues": team = "Support & Documentation"; break;
+                  case "FAQ": team = "Support & Documentation"; break;
+                  case "Announcements": team = "Media & Outreach"; break;
+                  case "Q&A": team = "Support & Documentation"; break;
+                  case "Members": team = "Marketing & Growth"; break;
+                }
+                
+                if (team) {
+                  console.log(`Assigning issue #${issue.number} to team: ${team}`);
+                  await github.rest.issues.addAssignees({
+                    owner: context.repo.owner,
+                    repo: "discussion_board", // Target repo
+                    issue_number: issue.number,
+                    assignees: [`@CryptoVersus/${team}`]
+                  });
+                }
+              } catch (error) {
+                console.error(`Error processing issue #${issue.number}: ${error.message}`);
+              }
+            }
+            
+  auto_close:
     runs-on: ubuntu-latest
     if: github.event_name == 'discussion' && github.event.action == 'answered'
     steps:
-      - name: Update Project Item When Discussion is Answered
+      - name: Close Issue When Discussion is Answered
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const discussion = context.payload.discussion;
-            const projectId = "PVT_kwDOCLSZrs4AsSM-";
             
-            // Find the discussion in the project
-            const findQuery = `
-            query($projectId: ID!, $query: String!) {
-              node(id: $projectId) {
-                ... on ProjectV2 {
-                  items(first: 5, query: $query) {
-                    nodes {
-                      id
-                      content {
-                        ... on Discussion {
-                          id
-                          url
-                        }
-                      }
-                    }
-                  }
-                  fields(first: 20) {
-                    nodes {
-                      ... on ProjectV2SingleSelectField {
-                        id
-                        name
-                        options {
-                          id
-                          name
-                        }
-                      }
-                    }
-                  }
-                }
+            // Search for issues in discussion_board repo with the client-support label
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: "discussion_board", // Target repo
+              labels: ["client-support"],
+              state: "open"
+            });
+            
+            for (const issue of issues.data) {
+              if (issue.body.includes(discussion.html_url)) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: "discussion_board", // Target repo
+                  issue_number: issue.number,
+                  state: "closed"
+                });
+                console.log(`Closed Issue: ${issue.html_url}`);
               }
-            }`;
-            
-            const findVariables = {
-              projectId: projectId,
-              query: discussion.title
-            };
-            
-            try {
-              const result = await github.graphql(findQuery, findVariables);
-              const items = result.node.items.nodes;
-              const fields = result.node.fields.nodes;
-              
-              const item = items.find(item => 
-                item.content && 
-                item.content.url === discussion.html_url
-              );
-              
-              if (item) {
-                // Find the Status field
-                const statusField = fields.find(field => field.name === "Status");
-                if (statusField) {
-                  // Find the Resolved option
-                  const resolvedOption = statusField.options.find(option => 
-                    option.name === "Resolved" || option.name === "Completed" || option.name === "Done"
-                  );
-                  
-                  if (resolvedOption) {
-                    // Update the status to Resolved/Completed/Done
-                    const updateQuery = `
-                    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                      updateProjectV2ItemFieldValue(input: {
-                        projectId: $projectId,
-                        itemId: $itemId,
-                        fieldId: $fieldId,
-                        value: { 
-                          singleSelectOptionId: $optionId
-                        }
-                      }) {
-                        projectV2Item {
-                          id
-                        }
-                      }
-                    }`;
-                    
-                    const updateVariables = {
-                      projectId: projectId,
-                      itemId: item.id,
-                      fieldId: statusField.id,
-                      optionId: resolvedOption.id
-                    };
-                    
-                    await github.graphql(updateQuery, updateVariables);
-                    console.log(`Updated discussion status to ${resolvedOption.name}: ${discussion.title}`);
-                  }
-                }
-              } else {
-                console.log(`Discussion not found in project: ${discussion.title}`);
-              }
-            } catch (error) {
-              console.error(`Error updating discussion: ${error.message}`);
             }
